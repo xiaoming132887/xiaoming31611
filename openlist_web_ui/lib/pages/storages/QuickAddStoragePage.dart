@@ -23,6 +23,9 @@ class _QuickAddStoragePageState extends State<QuickAddStoragePage> {
   String? _error;
   Map<String, dynamic> _drivers = <String, dynamic>{};
 
+  /// 已存在的挂载路径，用来避免创建时撞 mount_path（OpenList 会报 UNIQUE 约束失败）
+  final Set<String> _usedMountPaths = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -34,6 +37,7 @@ class _QuickAddStoragePageState extends State<QuickAddStoragePage> {
       _loading = true;
       _error = null;
     });
+    await _loadUsedMountPaths();
     try {
       final dio = getDIO();
       final response = await dio.getUri(Uri.parse('/api/admin/driver/list'));
@@ -57,6 +61,35 @@ class _QuickAddStoragePageState extends State<QuickAddStoragePage> {
         _error = '读取驱动列表失败：$e';
       });
     }
+  }
+
+  /// 读出已有存储占用的挂载路径。
+  Future<void> _loadUsedMountPaths() async {
+    try {
+      final dio = getDIO();
+      final response = await dio.getUri(Uri.parse('/api/admin/storage/list'));
+      if (response.statusCode == 200 && response.data['code'] == 200) {
+        final content = response.data['data']?['content'];
+        if (content is List) {
+          _usedMountPaths
+            ..clear()
+            ..addAll(content.map((e) => '${e is Map ? e['mount_path'] : ''}'));
+        }
+      }
+    } catch (e) {
+      debugPrint('读取存储列表失败: $e');
+    }
+  }
+
+  /// 找一个没被占用的挂载路径：/夸克网盘、/夸克网盘-2、/夸克网盘-3 …
+  String _freeMountPath(String label) {
+    final base = '/$label';
+    if (!_usedMountPaths.contains(base)) return base;
+    for (var i = 2; i < 100; i++) {
+      final candidate = '$base-$i';
+      if (!_usedMountPaths.contains(candidate)) return candidate;
+    }
+    return '$base-${DateTime.now().millisecondsSinceEpoch}';
   }
 
   /// 找到该网盘对应的 OpenList 驱动名。
@@ -100,7 +133,7 @@ class _QuickAddStoragePageState extends State<QuickAddStoragePage> {
   }
 
   Future<_CreateForm?> _askCreateForm(CookieSite site, String driver) {
-    final mount = TextEditingController(text: '/${site.label}');
+    final mount = TextEditingController(text: _freeMountPath(site.label));
     final root = TextEditingController(text: '/');
     final remark = TextEditingController(text: site.label);
     return showDialog<_CreateForm>(
@@ -236,15 +269,32 @@ class _QuickAddStoragePageState extends State<QuickAddStoragePage> {
         return true;
       }
       if (mounted) {
-        show_failed(
-          '创建失败：${response.data['message'] ?? response.data}',
-          context,
+        await _showError(
+          '创建失败（HTTP ${response.statusCode}）',
+          '${response.data is Map ? (response.data['message'] ?? response.data) : response.data}',
         );
       }
     } catch (e) {
-      if (mounted) show_failed('创建失败：$e', context);
+      if (mounted) await _showError('创建失败', '$e');
     }
     return false;
+  }
+
+  /// 失败原因经常比较长，用弹窗完整展示，不要用会被截断的 Toast。
+  Future<void> _showError(String title, String message) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SingleChildScrollView(child: SelectableText(message)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   dynamic _defaultValueOf(Map<String, dynamic> field) {
